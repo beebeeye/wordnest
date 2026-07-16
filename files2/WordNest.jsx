@@ -225,8 +225,14 @@ async function generateWordInfo(rawWord) {
     body: JSON.stringify({ word: rawWord }),
   });
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error || `API error ${response.status}`);
+    let msg = `HTTP ${response.status}`;
+    try {
+      const err = await response.json();
+      if (err.error) msg = `${msg} — ${err.error}`;
+    } catch {
+      if (response.status === 404) msg = "HTTP 404 — /api/generate not found. Check that api/generate.js sits in the project ROOT (next to src/), or use the Next.js route version.";
+    }
+    throw new Error(msg);
   }
   return response.json();
 }
@@ -431,8 +437,8 @@ function AddWord({ words, onSave, onBack, onReviewNow }) {
       setSavedWord(newWord);
       setInput("");
       setStatus(null);
-    } catch {
-      setStatus({ err: true, msg: "Couldn't build the word card — please check your connection and try again." });
+    } catch (e) {
+      setStatus({ err: true, msg: `Couldn't build the word card. ${e.message || "Please check your connection and try again."}` });
     }
     setBusy(false);
   };

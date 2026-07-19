@@ -119,6 +119,11 @@ input:focus { outline: 2px solid var(--blue); outline-offset: 0; border-color: t
 }
 .phon { font-size: 15px; color: var(--muted); margin: 4px 0 0; }
 .phon b { color: var(--blue-deep); font-weight: 700; margin-left: 8px; }
+.audio-btn {
+  margin-left: 10px; border: 1px solid var(--line); background: var(--blue-mist);
+  border-radius: 999px; padding: 3px 10px; font-size: 13px; cursor: pointer;
+}
+.audio-btn:hover { border-color: var(--blue); }
 
 .sect { margin-top: 18px; }
 .sect-label {
@@ -216,25 +221,205 @@ async function saveWords(words) {
   catch { return false; }
 }
 
-/* ---------- AI word-card generation (via serverless API route) ---------- */
+/* ---------- word-card generation (free public APIs, no key needed) ----------
+   - Free Dictionary API (dictionaryapi.dev): pronunciation, POS, definitions, examples, syn/ant
+   - Datamuse (datamuse.com): collocations, spelling suggestions, word chains, syn/ant fallback
+   - MyMemory (mymemory.translated.net): free EN->ZH translation for the core concept
+   All are keyless and CORS-enabled, so everything runs in the browser. */
+
+const PREFIXES = [
+  ["tele", "远", "telephone, television"],
+  ["trans", "穿过、转换", "transport, translate"],
+  ["inter", "在…之间", "international, internet"],
+  ["super", "超级", "superman, supermarket"],
+  ["under", "在…下面、不足", "underground, underestimate"],
+  ["micro", "微小", "microscope, microwave"],
+  ["multi", "多", "multimedia, multiply"],
+  ["auto", "自动、自己", "automatic, autobiography"],
+  ["anti", "反对", "antivirus, antibody"],
+  ["over", "过度、在上", "overwork, overcome"],
+  ["semi", "半", "semicircle, semifinal"],
+  ["post", "在…之后", "postpone, postwar"],
+  ["pre", "在…之前", "preview, predict"],
+  ["dis", "不、相反", "dislike, disagree"],
+  ["mis", "错误地", "mistake, misunderstand"],
+  ["non", "非、不", "nonsense, nonstop"],
+  ["sub", "在…下面、次级", "subway, submarine"],
+  ["uni", "单一", "uniform, unique"],
+  ["un", "不、相反", "unhappy, unlucky"],
+  ["re", "再次、回", "return, review"],
+  ["ex", "向外、前任", "exit, export"],
+  ["bi", "二、双", "bicycle, bilingual"],
+  ["co", "共同", "cooperate, coworker"],
+  ["de", "向下、去除", "decrease, defrost"],
+  ["in", "不 / 向内", "invisible, include"],
+  ["im", "不 / 向内", "impossible, import"],
+];
+const SUFFIXES = [
+  ["ology", "…学科", "biology, psychology"],
+  ["phobia", "…恐惧症", "hydrophobia"],
+  ["ment", "名词后缀(行为/结果)", "movement, development"],
+  ["ness", "名词后缀(性质)", "happiness, kindness"],
+  ["tion", "名词后缀(动作/状态)", "action, education"],
+  ["sion", "名词后缀(动作/状态)", "decision, discussion"],
+  ["able", "能…的", "readable, comfortable"],
+  ["ible", "能…的", "visible, possible"],
+  ["ful", "充满…的", "beautiful, careful"],
+  ["less", "没有…的", "careless, homeless"],
+  ["ish", "有点…的 / 像…的", "childish, reddish"],
+  ["ist", "…的人(专家)", "artist, scientist"],
+  ["er", "…的人/物", "teacher, worker"],
+  ["or", "…的人/物", "actor, visitor"],
+  ["ly", "副词后缀", "quickly, happily"],
+];
+const LETTER_IMAGES = {
+  a: "苹果", b: "烤箱", c: "月牙", d: "半块西瓜", e: "盘子", f: "小旗杆",
+  g: "眼镜", h: "椅子", i: "蜡烛", j: "鱼钩", k: "刀叉", l: "筷子",
+  m: "两座山峰", n: "小门洞", o: "鸡蛋", p: "气球", q: "拖着线的气球", r: "发芽的小草",
+  s: "小蛇", t: "雨伞", u: "杯子", v: "胜利手势", w: "波浪", x: "剪刀",
+  y: "弹弓", z: "闪电",
+};
+
+async function fetchJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+function buildAffixMnemonic(word) {
+  for (const [p, zh, eg] of PREFIXES) {
+    if (word.startsWith(p) && word.length - p.length >= 3) {
+      return {
+        method: "词根词缀法",
+        content: `${p}(${zh}) + ${word.slice(p.length)} → ${word}。同前缀的词还有：${eg}，认识一个前缀，记住一串单词！`,
+      };
+    }
+  }
+  for (const [s, zh, eg] of SUFFIXES) {
+    if (word.endsWith(s) && word.length - s.length >= 3) {
+      return {
+        method: "词根词缀法",
+        content: `${word.slice(0, word.length - s.length)} + ${s}(${zh}) → ${word}。同后缀的词还有：${eg}。`,
+      };
+    }
+  }
+  return null;
+}
+
+async function buildChainMnemonic(word) {
+  if (word.length < 3 || word.includes(" ")) return null;
+  try {
+    // words spelled the same except the first letter, sorted by frequency
+    const list = await fetchJson(
+      `https://api.datamuse.com/words?sp=${encodeURIComponent("?" + word.slice(1))}&md=f&max=12`
+    );
+    const freq = (w) => {
+      const t = (w.tags || []).find((x) => x.startsWith("f:"));
+      return t ? parseFloat(t.slice(2)) : 0;
+    };
+    const chain = list
+      .filter((w) => w.word !== word && /^[a-z]+$/.test(w.word) && freq(w) > 1)
+      .sort((a, b) => freq(b) - freq(a))
+      .slice(0, 3)
+      .map((w) => w.word);
+    if (chain.length < 2) return null;
+    return {
+      method: "词汇链条法",
+      content: `${word} → ${chain.join(" → ")}，只换第一个字母就是一串新单词，放在一起记，温故又知新！`,
+    };
+  } catch { return null; }
+}
+
+function buildImageMnemonic(word) {
+  if (word.length < 3 || word.length > 6 || !/^[a-z]+$/.test(word)) return null;
+  const parts = [...word].map((ch) => `${ch} 像${LETTER_IMAGES[ch] || "一个符号"}`);
+  return {
+    method: "图像联想法",
+    content: `把字母拆开看：${parts.join("、")}。把这些画面串成一个动态小场景，看到 ${word} 就能"看"出意思！`,
+  };
+}
+
+async function translateZh(text) {
+  try {
+    const data = await fetchJson(
+      `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text.slice(0, 450))}&langpair=en|zh-CN`
+    );
+    const t = data?.responseData?.translatedText || "";
+    // MyMemory sometimes echoes the input or returns warnings in caps
+    if (!t || t.toUpperCase() === text.toUpperCase() || /MYMEMORY WARNING/i.test(t)) return "";
+    return t;
+  } catch { return ""; }
+}
 
 async function generateWordInfo(rawWord) {
-  const response = await fetch("/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ word: rawWord }),
-  });
-  if (!response.ok) {
-    let msg = `HTTP ${response.status}`;
+  const word = rawWord.toLowerCase().trim();
+
+  // ---- 1. Look the word up (also serves as spelling validation) ----
+  const dictRes = await fetch(
+    `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`
+  );
+  if (dictRes.status === 404) {
+    let suggestion = null;
     try {
-      const err = await response.json();
-      if (err.error) msg = `${msg} — ${err.error}`;
-    } catch {
-      if (response.status === 404) msg = "HTTP 404 — /api/generate not found. Check that api/generate.js sits in the project ROOT (next to src/), or use the Next.js route version.";
-    }
-    throw new Error(msg);
+      const s = await fetchJson(`https://api.datamuse.com/words?sp=${encodeURIComponent(word)}&max=1`);
+      if (s[0] && s[0].word !== word) suggestion = s[0].word;
+    } catch {}
+    return { valid: false, suggestion };
   }
-  return response.json();
+  if (!dictRes.ok) throw new Error(`词典服务暂时不可用 (HTTP ${dictRes.status})，请稍后再试`);
+  const entries = await dictRes.json();
+  const entry = entries[0] || {};
+
+  const pronunciation =
+    entry.phonetic || (entry.phonetics || []).find((p) => p.text)?.text || "";
+  const audio = (entry.phonetics || []).find((p) => p.audio)?.audio || null;
+  const meanings = entry.meanings || [];
+  const partsOfSpeech = [...new Set(meanings.map((m) => m.partOfSpeech).filter(Boolean))];
+  const defs = meanings.flatMap((m) => m.definitions || []);
+  const coreConceptEn = defs[0]?.definition || "";
+  const examples = defs.map((d) => d.example).filter(Boolean).slice(0, 3);
+  let synonyms = [...new Set(meanings.flatMap((m) => m.synonyms || []))].slice(0, 4);
+  let antonyms = [...new Set(meanings.flatMap((m) => m.antonyms || []))].slice(0, 3);
+
+  // ---- 2. In parallel: translation, collocations, syn/ant fallback, word chain ----
+  const [zh, before, after, synFallback, antFallback, chainM] = await Promise.all([
+    translateZh(coreConceptEn || word),
+    fetchJson(`https://api.datamuse.com/words?rel_bgb=${encodeURIComponent(word)}&max=4`).catch(() => []),
+    fetchJson(`https://api.datamuse.com/words?rel_bga=${encodeURIComponent(word)}&max=4`).catch(() => []),
+    synonyms.length ? Promise.resolve([]) :
+      fetchJson(`https://api.datamuse.com/words?rel_syn=${encodeURIComponent(word)}&max=4`).catch(() => []),
+    antonyms.length ? Promise.resolve([]) :
+      fetchJson(`https://api.datamuse.com/words?rel_ant=${encodeURIComponent(word)}&max=3`).catch(() => []),
+    buildChainMnemonic(word),
+  ]);
+
+  if (!synonyms.length) synonyms = synFallback.map((w) => w.word).slice(0, 4);
+  if (!antonyms.length) antonyms = antFallback.map((w) => w.word).slice(0, 3);
+
+  const collocations = [
+    ...before.filter((w) => /^[a-z]+$/.test(w.word)).map((w) => `${w.word} ${word}`),
+    ...after.filter((w) => /^[a-z]+$/.test(w.word)).map((w) => `${word} ${w.word}`),
+  ].slice(0, 6);
+
+  // ---- 3. Mnemonics: prefer roots > chains > letter images, keep up to 2 ----
+  const mnemonics = [buildAffixMnemonic(word), chainM, buildImageMnemonic(word)]
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return {
+    valid: true,
+    word,
+    pronunciation,
+    audio,
+    partsOfSpeech,
+    collocations,
+    coreConceptEn,
+    coreConceptZh: zh || "（在线翻译暂不可用）",
+    examples,
+    synonyms,
+    antonyms,
+    mnemonics,
+  };
 }
 
 /* ---------- scheduling ---------- */
@@ -277,12 +462,14 @@ function WordInfo({ info }) {
   if (!info) return null;
   return (
     <div>
-      <div className="sect">
-        <p className="sect-label"><span className="n">2</span>Collocations · natural partners</p>
-        <div className="chips">
-          {(info.collocations || []).map((c, i) => <span className="chip" key={i}>{c}</span>)}
+      {(info.collocations || []).length > 0 && (
+        <div className="sect">
+          <p className="sect-label"><span className="n">2</span>Collocations · natural partners</p>
+          <div className="chips">
+            {info.collocations.map((c, i) => <span className="chip" key={i}>{c}</span>)}
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="sect">
         <p className="sect-label"><span className="n">3</span>Core concept</p>
@@ -290,10 +477,12 @@ function WordInfo({ info }) {
         <p className="zh">{info.coreConceptZh}</p>
       </div>
 
-      <div className="sect">
-        <p className="sect-label"><span className="n">4</span>In context</p>
-        {(info.examples || []).map((e, i) => <p className="example" key={i}>"{e}"</p>)}
-      </div>
+      {(info.examples || []).length > 0 && (
+        <div className="sect">
+          <p className="sect-label"><span className="n">4</span>In context</p>
+          {info.examples.map((e, i) => <p className="example" key={i}>"{e}"</p>)}
+        </div>
+      )}
 
       <div className="sect">
         <p className="sect-label"><span className="n">5</span>Synonyms &amp; antonyms</p>
@@ -335,6 +524,15 @@ function WordHeader({ w }) {
           <span className="sect-label" style={{ display: "inline-flex", marginRight: 8 }}><span className="n">1</span></span>
           {info.pronunciation}
           <b>{(info.partsOfSpeech || []).join(" · ")}</b>
+          {info.audio && (
+            <button
+              className="audio-btn"
+              title="播放发音"
+              onClick={() => { try { new Audio(info.audio).play(); } catch {} }}
+            >
+              🔊
+            </button>
+          )}
         </p>
       )}
     </>
@@ -438,7 +636,7 @@ function AddWord({ words, onSave, onBack, onReviewNow }) {
       setInput("");
       setStatus(null);
     } catch (e) {
-      setStatus({ err: true, msg: `Couldn't build the word card. ${e.message || "Please check your connection and try again."}` });
+      setStatus({ err: true, msg: `无法创建单词卡：${e.message || "请检查网络后重试"}` });
     }
     setBusy(false);
   };
@@ -479,7 +677,7 @@ function AddWord({ words, onSave, onBack, onReviewNow }) {
       {busy && (
         <div className="center" style={{ marginTop: 20 }}>
           <div className="spinner" />
-          <p className="note">Building the study card — pronunciation, collocations, core concept, examples, synonyms and a memory hook…</p>
+          <p className="note">正在从免费词典查询发音、搭配、释义、例句、同反义词，并生成记忆方法…</p>
         </div>
       )}
       {status && <div className={"toast" + (status.err ? " err" : "")}>{status.msg}</div>}

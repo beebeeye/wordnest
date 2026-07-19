@@ -1,10 +1,17 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { createClient } from "@supabase/supabase-js";
 
 /* ---------- constants ---------- */
 
 const DAY = 24 * 60 * 60 * 1000;
 const OFFSETS = [1, 3, 7]; // days after first learning
 const STORE_KEY = "vocab-words-v2";
+
+/* ---------- Supabase (email accounts + cloud sync) ----------
+   Configure via env vars; without them the app still works in local-only mode. */
+const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabase = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
 
 const css = `
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap');
@@ -182,6 +189,17 @@ input:focus { outline: 2px solid var(--blue); outline-offset: 0; border-color: t
 .trail-label { font-size: 12px; color: var(--muted); margin-left: 8px; font-weight: 600; }
 
 .progress { font-size: 13px; color: var(--muted); font-weight: 600; margin-bottom: 14px; }
+.acct-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 9px 14px; margin-bottom: 16px;
+  font-size: 13px; color: var(--muted); font-weight: 600;
+}
+.acct-bar .link {
+  border: none; background: none; color: var(--blue-deep);
+  font-family: inherit; font-size: 13px; font-weight: 800; cursor: pointer; padding: 0;
+}
+.acct-bar .link:hover { text-decoration: underline; }
 .wrow {
   width: 100%;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -235,17 +253,52 @@ input:focus { outline: 2px solid var(--blue); outline-offset: 0; border-color: t
 }
 `;
 
-/* ---------- storage (browser localStorage) ---------- */
+/* ---------- storage: cloud (per-account) when logged in, localStorage otherwise ---------- */
 
-async function loadWords() {
+function localLoad() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
     return raw ? JSON.parse(raw) : [];
   } catch { return []; }
 }
-async function saveWords(words) {
+function localSave(words) {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(words)); return true; }
   catch { return false; }
+}
+
+async function cloudLoad(userId) {
+  const { data, error } = await supabase
+    .from("notebooks").select("words").eq("user_id", userId).maybeSingle();
+  if (error) throw new Error(error.message);
+  return data?.words || [];
+}
+async function cloudSave(userId, words) {
+  const { error } = await supabase
+    .from("notebooks")
+    .upsert({ user_id: userId, words, updated_at: new Date().toISOString() });
+  return !error;
+}
+
+async function loadWords(user) {
+  if (supabase && user) return cloudLoad(user.id);
+  return localLoad();
+}
+async function saveWords(words, user) {
+  if (supabase && user) return cloudSave(user.id, words);
+  return localSave(words);
+}
+
+// On login: upload any local-only words into the account, then use the cloud copy.
+async function mergeLocalIntoCloud(user) {
+  const local = localLoad();
+  const cloud = await cloudLoad(user.id);
+  if (local.length === 0) return cloud;
+  const have = new Set(cloud.map((w) => w.word.toLowerCase()));
+  const extras = local.filter((w) => !have.has(w.word.toLowerCase()));
+  const merged = [...cloud, ...extras];
+  if (extras.length > 0) await cloudSave(user.id, merged);
+  localStorage.removeItem(STORE_KEY); // avoid double-counting next time
+  return merged;
 }
 
 /* ---------- word-card generation (free public APIs, no key needed) ----------
@@ -563,6 +616,109 @@ function WordHeader({ w }) {
         </p>
       )}
     </>
+  );
+}
+
+/* ---------- account (email register / login) ---------- */
+
+function Account({ user, onBack, onLoggedOut }) {
+  const [mode, setMode] = useState("login"); // login | register
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null); // {err, text}
+
+  if (!supabase) {
+    return (
+      <div className="card">
+        <p className="eyebrow">账号</p>
+        <p className="note">
+          还未配置账号服务：需要在环境变量中设置 VITE_SUPABASE_URL 和 VITE_SUPABASE_ANON_KEY（见 README-account.md）。配置前单词仅保存在本机浏览器里。
+        </p>
+        <div className="row"><button className="btn primary" onClick={onBack}>Back to start</button></div>
+      </div>
+    );
+  }
+
+  if (user) {
+    return (
+      <div className="card">
+        <p className="eyebrow">已登录</p>
+        <p style={{ margin: 0, fontWeight: 700 }}>{user.email}</p>
+        <p className="note" style={{ marginTop: 8 }}>
+          你的单词和复习进度已保存在云端账号里，换设备登录同一账号即可继续学习。
+        </p>
+        <div className="row">
+          <button className="btn ghost" onClick={onBack}>Back to start</button>
+          <button
+            className="btn soft"
+            onClick={async () => { await supabase.auth.signOut(); onLoggedOut(); }}
+          >
+            退出登录
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const submit = async () => {
+    const em = email.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) { setMsg({ err: true, text: "请输入有效的邮箱地址" }); return; }
+    if (pw.length < 6) { setMsg({ err: true, text: "密码至少 6 位" }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      if (mode === "register") {
+        const { data, error } = await supabase.auth.signUp({ email: em, password: pw });
+        if (error) throw error;
+        if (data.user && !data.session) {
+          setMsg({ err: false, text: "注册成功！请到邮箱点击确认链接，然后回来登录。" });
+        }
+        // if email confirmation is disabled, data.session exists and the auth
+        // listener in the root component logs the user in automatically
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: em, password: pw });
+        if (error) throw error;
+      }
+    } catch (e) {
+      const t = /Invalid login credentials/i.test(e.message) ? "邮箱或密码错误"
+        : /already registered/i.test(e.message) ? "这个邮箱已注册过，请直接登录"
+        : /Email not confirmed/i.test(e.message) ? "邮箱还未确认，请先到邮箱点击确认链接"
+        : e.message;
+      setMsg({ err: true, text: t });
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="card">
+      <p className="eyebrow">{mode === "login" ? "登录账号" : "注册新账号"}</p>
+      <label htmlFor="em">邮箱 Email</label>
+      <input id="em" type="email" value={email} disabled={busy}
+        onChange={(e) => { setEmail(e.target.value); setMsg(null); }}
+        placeholder="you@example.com" autoFocus />
+      <label htmlFor="pw">密码 Password</label>
+      <input id="pw" type="password" value={pw} disabled={busy}
+        onChange={(e) => { setPw(e.target.value); setMsg(null); }}
+        onKeyDown={(e) => { if (e.key === "Enter" && !busy) submit(); }}
+        placeholder="至少 6 位" />
+      {msg && <div className={"toast" + (msg.err ? " err" : "")}>{msg.text}</div>}
+      <div className="row">
+        <button className="btn ghost" onClick={onBack} disabled={busy}>Back to start</button>
+        <button className="btn primary" onClick={submit} disabled={busy}>
+          {busy ? "请稍候…" : mode === "login" ? "登录" : "注册"}
+        </button>
+      </div>
+      <p className="note center" style={{ marginTop: 14 }}>
+        {mode === "login" ? "还没有账号？" : "已有账号？"}{" "}
+        <button className="acct-bar-inline link" style={{ border: "none", background: "none", color: "var(--blue-deep)", fontWeight: 800, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}
+          onClick={() => { setMode(mode === "login" ? "register" : "login"); setMsg(null); }}>
+          {mode === "login" ? "去注册" : "去登录"}
+        </button>
+      </p>
+      <p className="note" style={{ marginTop: 10 }}>
+        登录后，本机已有的单词会自动合并到你的账号里。
+      </p>
+    </div>
   );
 }
 
@@ -918,13 +1074,51 @@ export default function WordNest() {
   const [screen, setScreen] = useState("home");
   const [words, setWords] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
+  const [user, setUser] = useState(null);
+  const [syncErr, setSyncErr] = useState(false);
+  const mergedFor = useRef(null); // user id we already merged local words for
 
-  useEffect(() => { loadWords().then(setWords); }, []);
+  // watch auth state
+  useEffect(() => {
+    if (!supabase) return;
+    supabase.auth.getSession().then(({ data }) => setUser(data.session?.user || null));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, session) => {
+      setUser(session?.user || null);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  // (re)load words whenever the account changes
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setWords(null);
+      try {
+        let list;
+        if (supabase && user) {
+          if (mergedFor.current !== user.id) {
+            list = await mergeLocalIntoCloud(user);
+            mergedFor.current = user.id;
+          } else {
+            list = await cloudLoad(user.id);
+          }
+        } else {
+          list = localLoad();
+        }
+        if (alive) { setWords(list); setSyncErr(false); }
+      } catch {
+        if (alive) { setWords(localLoad()); setSyncErr(true); }
+      }
+    })();
+    return () => { alive = false; };
+  }, [user]);
 
   const persist = useCallback(async (next) => {
     setWords(next);
-    return saveWords(next);
-  }, []);
+    const ok = await saveWords(next, user);
+    setSyncErr(!ok && Boolean(user));
+    return ok;
+  }, [user]);
 
   const addWord = async (w) => persist([...(words || []), w]);
   const updateWord = async (w) => persist((words || []).map((x) => (x.id === w.id ? w : x)));
@@ -938,7 +1132,28 @@ export default function WordNest() {
           <span>1 · 3 · 7 day review</span>
         </div>
 
-        {words === null ? (
+        <div className="acct-bar">
+          <span>
+            {supabase
+              ? user
+                ? `☁️ ${user.email}${syncErr ? " · 同步失败，正使用本地数据" : " · 已云端同步"}`
+                : "未登录 · 单词仅存在本机"
+              : "本地模式"}
+          </span>
+          {supabase && (
+            <button className="link" onClick={() => setScreen("account")}>
+              {user ? "账号管理" : "登录 / 注册"}
+            </button>
+          )}
+        </div>
+
+        {screen === "account" ? (
+          <Account
+            user={user}
+            onBack={() => setScreen("home")}
+            onLoggedOut={() => { mergedFor.current = null; setScreen("home"); }}
+          />
+        ) : words === null ? (
           <div className="card center"><p className="note">Loading your words…</p></div>
         ) : screen === "home" ? (
           <Home words={words} onGo={setScreen} />

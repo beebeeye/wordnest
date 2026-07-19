@@ -182,6 +182,33 @@ input:focus { outline: 2px solid var(--blue); outline-offset: 0; border-color: t
 .trail-label { font-size: 12px; color: var(--muted); margin-left: 8px; font-weight: 600; }
 
 .progress { font-size: 13px; color: var(--muted); font-weight: 600; margin-bottom: 14px; }
+.wrow {
+  width: 100%;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 14px; padding: 14px 16px; margin-bottom: 10px;
+  cursor: pointer; font-family: inherit; text-align: left;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.wrow:hover, .wrow:focus-visible {
+  border-color: var(--blue);
+  box-shadow: 0 4px 14px rgba(74, 125, 222, 0.10);
+  outline: none;
+}
+.wrow .wname {
+  font-family: 'Fraunces', serif;
+  font-size: 18px; font-weight: 700; margin: 0;
+}
+.wrow .wstat { font-size: 12.5px; font-weight: 700; flex-shrink: 0; }
+.wstat.due { color: var(--blue-deep); }
+.wstat.new { color: var(--green); }
+.wstat.later { color: var(--muted); }
+.wstat.done { color: var(--muted); }
+.queue-box {
+  margin-top: 18px; border-top: 1px dashed var(--line); padding-top: 16px;
+}
+.queue-box .wrow { padding: 11px 14px; margin-bottom: 8px; }
+.queue-box .wname { font-size: 16px; }
 .center { text-align: center; }
 .done-icon {
   width: 56px; height: 56px; border-radius: 50%;
@@ -539,6 +566,104 @@ function WordHeader({ w }) {
   );
 }
 
+/* ---------- word list & detail ---------- */
+
+function fmtDate(ts) {
+  const d = new Date(ts);
+  return `${d.getMonth() + 1}月${d.getDate()}日`;
+}
+function statusOf(w, now) {
+  if (w.stage === 0) return { cls: "new", text: "新词 · 待学习" };
+  if (w.stage === 4) return { cls: "done", text: "已掌握 ✓" };
+  if (isDue(w, now)) return { cls: "due", text: "到期待复习" };
+  return { cls: "later", text: `下次复习 ${fmtDate(w.nextReview)}` };
+}
+
+function WordRow({ w, now, onClick }) {
+  const s = statusOf(w, now);
+  return (
+    <button className="wrow" onClick={onClick}>
+      <span className="wname">{w.word}</span>
+      <span className={`wstat ${s.cls}`}>{s.text}</span>
+    </button>
+  );
+}
+
+function WordList({ words, onOpen, onBack }) {
+  const now = Date.now();
+  const sorted = [...words].sort((a, b) => b.createdAt - a.createdAt);
+  return (
+    <>
+      <div className="card" style={{ marginBottom: 14 }}>
+        <p className="eyebrow">词库 · All words</p>
+        <p className="note">共 {words.length} 个单词，点击任意单词随时查看完整卡片并复习。</p>
+      </div>
+      {sorted.length === 0 && (
+        <div className="card center"><p className="note">还没有单词，先去输入一个吧！</p></div>
+      )}
+      {sorted.map((w) => (
+        <WordRow key={w.id} w={w} now={now} onClick={() => onOpen(w.id)} />
+      ))}
+      <div className="row">
+        <button className="btn ghost" onClick={onBack}>Back to start</button>
+      </div>
+    </>
+  );
+}
+
+function WordDetail({ w, onUpdate, onBack }) {
+  const now = Date.now();
+  if (!w) {
+    return (
+      <div className="card center">
+        <p className="note">这个单词不存在。</p>
+        <div className="row"><button className="btn primary" onClick={onBack}>返回词库</button></div>
+      </div>
+    );
+  }
+  const s = statusOf(w, now);
+  const isNew = w.stage === 0;
+  const due = isDue(w, now);
+
+  const answer = async (learned) => {
+    const updated = learned ? scheduleNext(w, Date.now()) : pushBack(w, Date.now());
+    await onUpdate(updated);
+  };
+
+  return (
+    <div className="card">
+      <p className="eyebrow">{s.text}</p>
+      <WordHeader w={w} />
+      <WordInfo info={w.info} />
+      <Trail stage={w.stage} />
+
+      {!isNew && !due && w.stage !== 4 && (
+        <p className="note" style={{ marginTop: 14 }}>
+          提前查看不影响复习计划，到期后会自动进入复习队列。
+        </p>
+      )}
+      {w.stage === 4 && (
+        <p className="note" style={{ marginTop: 14 }}>这个词已完成 1/3/7 天全部复习，随时回来看看巩固印象。</p>
+      )}
+
+      <div className="row">
+        <button className="btn ghost" onClick={onBack}>返回词库</button>
+        {isNew && (
+          <button className="btn primary" onClick={async () => { await answer(true); onBack(); }}>
+            I've learned this word
+          </button>
+        )}
+        {due && (
+          <>
+            <button className="btn soft" onClick={async () => { await answer(false); onBack(); }}>Not yet</button>
+            <button className="btn primary" onClick={async () => { await answer(true); onBack(); }}>I remember it</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------- screens ---------- */
 
 function Home({ words, onGo }) {
@@ -568,6 +693,14 @@ function Home({ words, onGo }) {
           <p>Type a word — its full study card is built for you automatically.</p>
         </div>
         <span className="badge">＋</span>
+      </button>
+
+      <button className="choice" onClick={() => onGo("list")}>
+        <div>
+          <h2>词库 · All words</h2>
+          <p>随时查看和复习之前输入过的任意单词。</p>
+        </div>
+        <span className={"badge" + (words.length === 0 ? " zero" : "")}>{words.length}</span>
       </button>
 
       <p className="note center" style={{ marginTop: 18 }}>
@@ -641,18 +774,34 @@ function AddWord({ words, onSave, onBack, onReviewNow }) {
     setBusy(false);
   };
 
-  // After a word is created: review now or later?
+  // After a word is created: show the full card + the whole review queue
   if (savedWord) {
+    const now = Date.now();
+    const fresh = words.filter((w) => w.stage === 0).sort((a, b) => b.createdAt - a.createdAt);
+    const due = words.filter((w) => isDue(w, now)).sort((a, b) => a.nextReview - b.nextReview);
+    const queue = [...fresh, ...due];
     return (
       <div className="card">
         <p className="eyebrow">Word card ready</p>
-        <h2 className="word" style={{ fontSize: 28 }}>{savedWord.word}</h2>
-        <p className="note" style={{ marginTop: 8 }}>
-          Its full study card — pronunciation, collocations, core concept, examples, synonyms and a memory hook — has been created.
-        </p>
+        <WordHeader w={savedWord} />
+        <WordInfo info={savedWord.info} />
+
+        <div className="queue-box">
+          <p className="eyebrow">当前待复习队列 · {queue.length} 张卡片</p>
+          {queue.map((w) => {
+            const s = statusOf(w, now);
+            return (
+              <div className="wrow" key={w.id} style={{ cursor: "default" }}>
+                <span className="wname">{w.word}{w.id === savedWord.id ? " ← 刚输入" : ""}</span>
+                <span className={`wstat ${s.cls}`}>{s.text}</span>
+              </div>
+            );
+          })}
+        </div>
+
         <div className="row">
           <button className="btn soft" onClick={() => setSavedWord(null)}>Later — input next word</button>
-          <button className="btn primary" onClick={onReviewNow}>Review it now</button>
+          <button className="btn primary" onClick={onReviewNow}>Start reviewing</button>
         </div>
         <div className="row" style={{ marginTop: 10 }}>
           <button className="btn ghost" onClick={onBack}>Back to start</button>
@@ -768,6 +917,7 @@ function Review({ words, onUpdate, onBack }) {
 export default function WordNest() {
   const [screen, setScreen] = useState("home");
   const [words, setWords] = useState(null);
+  const [selectedId, setSelectedId] = useState(null);
 
   useEffect(() => { loadWords().then(setWords); }, []);
 
@@ -798,6 +948,18 @@ export default function WordNest() {
             onSave={addWord}
             onBack={() => setScreen("home")}
             onReviewNow={() => setScreen("review")}
+          />
+        ) : screen === "list" ? (
+          <WordList
+            words={words}
+            onOpen={(id) => { setSelectedId(id); setScreen("detail"); }}
+            onBack={() => setScreen("home")}
+          />
+        ) : screen === "detail" ? (
+          <WordDetail
+            w={words.find((x) => x.id === selectedId)}
+            onUpdate={updateWord}
+            onBack={() => setScreen("list")}
           />
         ) : (
           <Review words={words} onUpdate={updateWord} onBack={() => setScreen("home")} />

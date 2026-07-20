@@ -505,6 +505,9 @@ async function generateWordInfo(rawWord) {
 /* ---------- scheduling ---------- */
 
 function isDue(w, now) { return w.stage >= 1 && w.stage <= 3 && w.nextReview <= now; }
+// stage-0 words can be deferred to tomorrow ("没记住") via nextReview
+function isFresh(w, now) { return w.stage === 0 && (!w.nextReview || w.nextReview <= now); }
+function deferNew(w, now) { return { ...w, nextReview: now + DAY }; }
 function scheduleNext(w, now) {
   if (w.stage === 0) return { ...w, stage: 1, learnedAt: now, nextReview: now + OFFSETS[0] * DAY };
   const next = w.stage + 1;
@@ -729,7 +732,10 @@ function fmtDate(ts) {
   return `${d.getMonth() + 1}月${d.getDate()}日`;
 }
 function statusOf(w, now) {
-  if (w.stage === 0) return { cls: "new", text: "新词 · 待学习" };
+  if (w.stage === 0) {
+    if (w.nextReview && w.nextReview > now) return { cls: "later", text: "新词 · 明天继续学" };
+    return { cls: "new", text: "新词 · 待学习" };
+  }
   if (w.stage === 4) return { cls: "done", text: "已掌握 ✓" };
   if (isDue(w, now)) return { cls: "due", text: "到期待复习" };
   return { cls: "later", text: `下次复习 ${fmtDate(w.nextReview)}` };
@@ -767,8 +773,9 @@ function WordList({ words, onOpen, onBack }) {
   );
 }
 
-function WordDetail({ w, onUpdate, onBack }) {
+function WordDetail({ w, onUpdate, onDelete, onBack }) {
   const now = Date.now();
+  const [confirmDel, setConfirmDel] = useState(false);
   if (!w) {
     return (
       <div className="card center">
@@ -778,11 +785,14 @@ function WordDetail({ w, onUpdate, onBack }) {
     );
   }
   const s = statusOf(w, now);
-  const isNew = w.stage === 0;
+  const isNew = isFresh(w, now);
   const due = isDue(w, now);
 
   const answer = async (learned) => {
-    const updated = learned ? scheduleNext(w, Date.now()) : pushBack(w, Date.now());
+    const t = Date.now();
+    const updated = learned
+      ? scheduleNext(w, t)
+      : w.stage === 0 ? deferNew(w, t) : pushBack(w, t);
     await onUpdate(updated);
   };
 
@@ -803,17 +813,33 @@ function WordDetail({ w, onUpdate, onBack }) {
       )}
 
       <div className="row">
-        <button className="btn ghost" onClick={onBack}>返回词库</button>
         {isNew && (
-          <button className="btn primary" onClick={async () => { await answer(true); onBack(); }}>
-            I've learned this word
-          </button>
+          <>
+            <button className="btn soft" onClick={async () => { await answer(false); onBack(); }}>没记住 · 明天再学</button>
+            <button className="btn primary" onClick={async () => { await answer(true); onBack(); }}>记住了</button>
+          </>
         )}
         {due && (
           <>
-            <button className="btn soft" onClick={async () => { await answer(false); onBack(); }}>Not yet</button>
-            <button className="btn primary" onClick={async () => { await answer(true); onBack(); }}>I remember it</button>
+            <button className="btn soft" onClick={async () => { await answer(false); onBack(); }}>没记住</button>
+            <button className="btn primary" onClick={async () => { await answer(true); onBack(); }}>记住了</button>
           </>
+        )}
+      </div>
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="btn ghost" onClick={onBack}>返回词库</button>
+        {!confirmDel ? (
+          <button className="btn ghost" style={{ color: "#b04444" }} onClick={() => setConfirmDel(true)}>
+            删除这个单词
+          </button>
+        ) : (
+          <button
+            className="btn"
+            style={{ background: "#fdeeee", color: "#b04444" }}
+            onClick={() => onDelete(w.id)}
+          >
+            确认删除？不可恢复
+          </button>
         )}
       </div>
     </div>
@@ -824,7 +850,7 @@ function WordDetail({ w, onUpdate, onBack }) {
 
 function Home({ words, onGo }) {
   const now = Date.now();
-  const newest = words.filter((w) => w.stage === 0).length;
+  const newest = words.filter((w) => isFresh(w, now)).length;
   const due = words.filter((w) => isDue(w, now)).length;
   const mastered = words.filter((w) => w.stage === 4).length;
   const total = newest + due;
@@ -933,7 +959,7 @@ function AddWord({ words, onSave, onBack, onReviewNow }) {
   // After a word is created: show the full card + the whole review queue
   if (savedWord) {
     const now = Date.now();
-    const fresh = words.filter((w) => w.stage === 0).sort((a, b) => b.createdAt - a.createdAt);
+    const fresh = words.filter((w) => isFresh(w, now)).sort((a, b) => b.createdAt - a.createdAt);
     const due = words.filter((w) => isDue(w, now)).sort((a, b) => a.nextReview - b.nextReview);
     const queue = [...fresh, ...due];
     return (
@@ -996,9 +1022,9 @@ function AddWord({ words, onSave, onBack, onReviewNow }) {
   );
 }
 
-function Review({ words, onUpdate, onBack }) {
+function Review({ words, onUpdate, onBack, onAdd }) {
   const now = Date.now();
-  const fresh = words.filter((w) => w.stage === 0).sort((a, b) => b.createdAt - a.createdAt);
+  const fresh = words.filter((w) => isFresh(w, now)).sort((a, b) => b.createdAt - a.createdAt);
   const due = words.filter((w) => isDue(w, now)).sort((a, b) => a.nextReview - b.nextReview);
   const queue = [...fresh, ...due];
 
@@ -1012,7 +1038,8 @@ function Review({ words, onUpdate, onBack }) {
         <p className="eyebrow" style={{ textAlign: "center" }}>All caught up</p>
         <p className="note">You've finished everything due today. Reviews unlock 1, 3, and 7 days after each word is first learned.</p>
         <div className="row">
-          <button className="btn primary" onClick={onBack}>Back to start</button>
+          <button className="btn ghost" onClick={onBack}>Back to start</button>
+          <button className="btn primary" onClick={onAdd}>＋ Input a new word</button>
         </div>
       </div>
     );
@@ -1022,7 +1049,10 @@ function Review({ words, onUpdate, onBack }) {
   const isNew = w.stage === 0;
 
   const answer = async (learned) => {
-    const updated = learned ? scheduleNext(w, Date.now()) : pushBack(w, Date.now());
+    const t = Date.now();
+    const updated = learned
+      ? scheduleNext(w, t)
+      : w.stage === 0 ? deferNew(w, t) : pushBack(w, t);
     setRevealed(false);
     await onUpdate(updated);
   };
@@ -1049,20 +1079,21 @@ function Review({ words, onUpdate, onBack }) {
       <div className="row">
         {isNew ? (
           <>
-            <button className="btn ghost" onClick={onBack}>Back to start</button>
-            <button className="btn primary" onClick={() => answer(true)}>I've learned this word</button>
+            <button className="btn soft" onClick={() => answer(false)}>没记住 · 明天再学</button>
+            <button className="btn primary" onClick={() => answer(true)}>记住了 I've learned it</button>
           </>
         ) : !revealed ? (
-          <>
-            <button className="btn ghost" onClick={onBack}>Back to start</button>
-            <button className="btn soft" onClick={() => setRevealed(true)}>Show the card</button>
-          </>
+          <button className="btn soft" onClick={() => setRevealed(true)}>Show the card</button>
         ) : (
           <>
-            <button className="btn soft" onClick={() => answer(false)}>Not yet — show me tomorrow</button>
-            <button className="btn primary" onClick={() => answer(true)}>I remember it</button>
+            <button className="btn soft" onClick={() => answer(false)}>没记住 · 明天再复习</button>
+            <button className="btn primary" onClick={() => answer(true)}>记住了 I remember it</button>
           </>
         )}
+      </div>
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="btn ghost" onClick={onBack}>Back to start</button>
+        <button className="btn ghost" onClick={onAdd}>＋ 输入新单词</button>
       </div>
     </div>
   );
@@ -1122,6 +1153,10 @@ export default function WordNest() {
 
   const addWord = async (w) => persist([...(words || []), w]);
   const updateWord = async (w) => persist((words || []).map((x) => (x.id === w.id ? w : x)));
+  const deleteWord = async (id) => {
+    await persist((words || []).filter((x) => x.id !== id));
+    setScreen("list");
+  };
 
   return (
     <div className="app">
@@ -1174,10 +1209,16 @@ export default function WordNest() {
           <WordDetail
             w={words.find((x) => x.id === selectedId)}
             onUpdate={updateWord}
+            onDelete={deleteWord}
             onBack={() => setScreen("list")}
           />
         ) : (
-          <Review words={words} onUpdate={updateWord} onBack={() => setScreen("home")} />
+          <Review
+            words={words}
+            onUpdate={updateWord}
+            onBack={() => setScreen("home")}
+            onAdd={() => setScreen("add")}
+          />
         )}
       </div>
     </div>
